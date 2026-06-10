@@ -148,19 +148,35 @@ function createSmoothWordStreamer(res,delayMs=STREAM_CHUNK_DELAY_MS){
     };
 }
 
-console.log("Loading model....");
-const llama=await getLlama();
-
-const model=await llama.loadModel({
-    modelPath:"./models/model.gguf"
-});
-
-let context=await model.createContext();
+let llama=null;
+let model=null;
+let context=null;
 let contextResetInProgress=false;
+let modelLoaded=false;
+let modelLoadingError=null;
 
-console.log("Model loaded successfully");
+async function initModel() {
+    try {
+        console.log("Loading model....");
+        llama=await getLlama();
+        model=await llama.loadModel({
+            modelPath:"./models/model.gguf"
+        });
+        context=await model.createContext();
+        modelLoaded=true;
+        console.log("Model loaded successfully");
+    } catch (error) {
+        console.error("Failed to load model:", error);
+        modelLoadingError=error;
+    }
+}
+
+initModel();
 
 async function ensureContextSequenceAvailable(){
+    if (!modelLoaded) {
+        return false;
+    }
     try{
         if(context.sequencesLeft>0){
             return true;
@@ -190,6 +206,17 @@ app.post("/chat",async(req,res)=>{
     if(typeof prompt!=="string" || prompt.trim()===""){
         return res.status(400).json({
             error:"prompt is required"
+        });
+    }
+
+    if (!modelLoaded) {
+        if (modelLoadingError) {
+            return res.status(500).json({
+                error: `Model failed to load: ${modelLoadingError.message}`
+            });
+        }
+        return res.status(503).json({
+            error: "Model is still loading in the background, please try again in a few moments."
         });
     }
 
@@ -279,12 +306,12 @@ app.get("/",(req,res)=>{
 
 const PORT=process.env.PORT || 3000;
 
-const server=app.listen(PORT,(error)=>{
+const server=app.listen(PORT,"0.0.0.0",(error)=>{
     if(error){
         console.error(`Failed to start server on ${PORT}:`,error.message);
         process.exitCode=1;
         return;
     }
 
-    console.log(`Server running  on ${PORT}`);
+    console.log(`Server running on ${PORT}`);
 });
