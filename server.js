@@ -1,5 +1,12 @@
 import express from "express";
 import { getLlama, LlamaChatSession } from "node-llama-cpp";
+
+try {
+    process.loadEnvFile();
+} catch {
+    // Ignore if .env file is missing
+}
+
 const app=express();
 app.use(express.json());
 
