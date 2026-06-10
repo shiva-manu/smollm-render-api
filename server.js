@@ -178,11 +178,11 @@ async function ensureContextSequenceAvailable(){
         return false;
     }
     try{
-        if(context.sequencesLeft>0){
+        if(context && context.sequencesLeft>0){
             return true;
         }
-    }catch{
-        // Fall through and rebuild the context below.
+    }catch(err){
+        console.log("sequencesLeft check failed, will reset context:", err.message);
     }
 
     if(generationInProgress || contextResetInProgress){
@@ -192,13 +192,25 @@ async function ensureContextSequenceAvailable(){
     contextResetInProgress=true;
 
     try{
-        await context.dispose();
+        try { await context?.dispose(); } catch {}
         context=await model.createContext();
         return context.sequencesLeft>0;
+    }catch(err){
+        console.error("Failed to reset context:", err);
+        return false;
     }finally{
         contextResetInProgress=false;
     }
 }
+
+app.get("/status",(req,res)=>{
+    res.json({
+        modelLoaded,
+        modelLoadingError: modelLoadingError?.message ?? null,
+        generationInProgress,
+        contextResetInProgress
+    });
+});
 
 app.post("/chat",async(req,res)=>{
     const {prompt,maxTokens}=req.body ?? {};
