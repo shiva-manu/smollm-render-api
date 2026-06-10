@@ -5,8 +5,11 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "test -f models/model.gguf || (mkdir -p models && curl -L -f -sS \"https://huggingface.co/jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf\" -o models/model.gguf)",
+    "postinstall": "test -s models/model.gguf || (mkdir -p models && curl -L -f -sS \"https://huggingface.co/jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf\" -o models/model.gguf)",
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "keywords": [],
   "author": "",

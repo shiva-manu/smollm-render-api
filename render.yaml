@@ -6,10 +6,13 @@ services:
     buildCommand: |
       npm install
 
-      mkdir -p models
-
-      curl -L \
-      "https://huggingface.co/jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf" \
-      -o models/model.gguf
+      test -s models/model.gguf
 
     startCommand: npm start
+    envVars:
+      - key: STREAM_CHUNK_DELAY_MS
+        value: "0"
+      - key: GENERATION_TIMEOUT_MS
+        value: "120000"
+      - key: LLAMA_GPU
+        value: "false"

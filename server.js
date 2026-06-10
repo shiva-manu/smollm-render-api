@@ -10,18 +10,48 @@ try {
 const app=express();
 app.use(express.json());
 
+const MODEL_PATH=process.env.MODEL_PATH ?? "./models/model.gguf";
+
+const parsePositiveInteger=(value,fallback)=>{
+    const parsed=Number(value);
+
+    if(Number.isFinite(parsed) && parsed>0){
+        return Math.floor(parsed);
+    }
+
+    return fallback;
+};
+
 const configuredStreamDelayMs=Number(process.env.STREAM_CHUNK_DELAY_MS);
 const STREAM_CHUNK_DELAY_MS=Number.isFinite(configuredStreamDelayMs)
     ? Math.max(0, configuredStreamDelayMs)
-    : 10;
+    : 0;
 
 const configuredMaxTokens=Number(process.env.MAX_TOKENS);
 const DEFAULT_MAX_TOKENS=Number.isFinite(configuredMaxTokens)
     ? Math.max(1, Math.floor(configuredMaxTokens))
     : 256;
 
+const GENERATION_TIMEOUT_MS=parsePositiveInteger(
+    process.env.GENERATION_TIMEOUT_MS,
+    120_000
+);
+const MODEL_CONTEXT_SIZE=parsePositiveInteger(process.env.MODEL_CONTEXT_SIZE,undefined);
+const MODEL_BATCH_SIZE=parsePositiveInteger(process.env.MODEL_BATCH_SIZE,undefined);
+const MODEL_THREADS=parsePositiveInteger(process.env.MODEL_THREADS,undefined);
+const LLAMA_GPU=process.env.LLAMA_GPU === "auto"
+    ? "auto"
+    : false;
+
 const sleep=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
 let generationInProgress=false;
+let requestCounter=0;
+
+const elapsedMs=(startedAt)=>Date.now()-startedAt;
+
+function logChatStep(requestId,startedAt,message){
+    console.log(`[chat ${requestId}] ${message} (${elapsedMs(startedAt)}ms)`);
+}
 
 function createSmoothWordStreamer(res,delayMs=STREAM_CHUNK_DELAY_MS){
     let buffer="";
@@ -155,16 +185,34 @@ let contextResetInProgress=false;
 let modelLoaded=false;
 let modelLoadingError=null;
 
+function getContextOptions(){
+    return {
+        sequences:1,
+        ...(MODEL_CONTEXT_SIZE ? {contextSize:MODEL_CONTEXT_SIZE} : {}),
+        ...(MODEL_BATCH_SIZE ? {batchSize:MODEL_BATCH_SIZE} : {}),
+        ...(MODEL_THREADS ? {threads:MODEL_THREADS} : {})
+    };
+}
+
+async function createModelContext(){
+    return model.createContext(getContextOptions());
+}
+
 async function initModel() {
+    const startedAt=Date.now();
+
     try {
-        console.log("Loading model....");
-        llama=await getLlama();
-        model=await llama.loadModel({
-            modelPath:"./models/model.gguf"
+        console.log(`Loading model from ${MODEL_PATH}...`);
+        llama=await getLlama({
+            gpu:LLAMA_GPU,
+            ...(MODEL_THREADS ? {maxThreads:MODEL_THREADS} : {})
         });
-        context=await model.createContext();
+        model=await llama.loadModel({
+            modelPath:MODEL_PATH
+        });
+        context=await createModelContext();
         modelLoaded=true;
-        console.log("Model loaded successfully");
+        console.log(`Model loaded successfully in ${elapsedMs(startedAt)}ms`);
     } catch (error) {
         console.error("Failed to load model:", error);
         modelLoadingError=error;
@@ -193,7 +241,7 @@ async function ensureContextSequenceAvailable(){
 
     try{
         try { await context?.dispose(); } catch {}
-        context=await model.createContext();
+        context=await createModelContext();
         return context.sequencesLeft>0;
     }catch(err){
         console.error("Failed to reset context:", err);
@@ -203,16 +251,32 @@ async function ensureContextSequenceAvailable(){
     }
 }
 
-app.get("/status",(req,res)=>{
-    res.json({
+function getServiceStatus(){
+    return {
+        status:modelLoaded ? "ready" : modelLoadingError ? "error" : "loading",
         modelLoaded,
-        modelLoadingError: modelLoadingError?.message ?? null,
+        modelLoadingError:modelLoadingError?.message ?? null,
         generationInProgress,
-        contextResetInProgress
-    });
+        contextResetInProgress,
+        defaults:{
+            maxTokens:DEFAULT_MAX_TOKENS,
+            streamChunkDelayMs:STREAM_CHUNK_DELAY_MS,
+            generationTimeoutMs:GENERATION_TIMEOUT_MS
+        }
+    };
+}
+
+app.get("/status",(req,res)=>{
+    res.json(getServiceStatus());
+});
+
+app.get("/health",(req,res)=>{
+    res.json(getServiceStatus());
 });
 
 app.post("/chat",async(req,res)=>{
+    const requestId=++requestCounter;
+    const requestStartedAt=Date.now();
     const {prompt,maxTokens}=req.body ?? {};
 
     if(typeof prompt!=="string" || prompt.trim()===""){
@@ -232,12 +296,6 @@ app.post("/chat",async(req,res)=>{
         });
     }
 
-    if(generationInProgress || !(await ensureContextSequenceAvailable())){
-        return res.status(429).json({
-            error:"model is busy, wait for the current response to finish"
-        });
-    }
-
     const promptMaxTokens=Number(maxTokens);
     const resolvedMaxTokens=Number.isFinite(promptMaxTokens)
         ? Math.max(1, Math.floor(promptMaxTokens))
@@ -246,30 +304,59 @@ app.post("/chat",async(req,res)=>{
     const abortController=new AbortController();
     const streamer=createSmoothWordStreamer(res);
     let responseFinished=false;
+    let requestClosed=false;
+    let generationTimedOut=false;
     let session;
+    let generationTimer;
 
     res.on("close",()=>{
+        requestClosed=true;
+
         if(!responseFinished){
             streamer.close();
             abortController.abort(new Error("Client disconnected"));
         }
     });
 
+    if(generationInProgress || !(await ensureContextSequenceAvailable())){
+        return res.status(429).json({
+            error:"model is busy, wait for the current response to finish"
+        });
+    }
+
     try{
         generationInProgress=true;
+        logChatStep(
+            requestId,
+            requestStartedAt,
+            `accepted promptChars=${prompt.length} maxTokens=${resolvedMaxTokens}`
+        );
+
+        res.setHeader("Content-Type","text/plain; charset=utf-8");
+        res.setHeader("Cache-Control","no-cache, no-transform");
+        res.setHeader("Connection","keep-alive");
+        res.setHeader("X-Accel-Buffering","no");
+        res.setHeader("X-Content-Type-Options","nosniff");
+        req.socket.setNoDelay(true);
+        res.flushHeaders?.();
+        logChatStep(requestId,requestStartedAt,"response headers flushed");
+
+        if(requestClosed){
+            return;
+        }
 
         session=new LlamaChatSession({
             contextSequence:context.getSequence(),
             autoDisposeSequence:true
         });
+        logChatStep(requestId,requestStartedAt,"chat session created");
 
-        res.setHeader("Content-Type","text/plain; charset=utf-8");
-        res.setHeader("Cache-Control","no-cache, no-transform");
-        res.setHeader("Connection","keep-alive");
-        res.setHeader("Transfer-Encoding","chunked");
-        res.setHeader("X-Content-Type-Options","nosniff");
-        req.socket.setNoDelay(true);
-        res.flushHeaders?.();
+        generationTimer=setTimeout(()=>{
+            generationTimedOut=true;
+            abortController.abort(
+                new Error(`Generation timed out after ${GENERATION_TIMEOUT_MS}ms`)
+            );
+        },GENERATION_TIMEOUT_MS);
 
         await session.prompt(
             prompt,
@@ -282,9 +369,11 @@ app.post("/chat",async(req,res)=>{
                 }
             }
         );
+        logChatStep(requestId,requestStartedAt,"model generation finished");
 
         await streamer.end();
         responseFinished=true;
+        logChatStep(requestId,requestStartedAt,"response stream finished");
 
         if(!res.destroyed && !res.writableEnded){
             res.end();
@@ -292,7 +381,7 @@ app.post("/chat",async(req,res)=>{
     }catch(error){
         streamer.close();
 
-        if(abortController.signal.aborted){
+        if(abortController.signal.aborted && !generationTimedOut){
             return;
         }
 
@@ -307,6 +396,7 @@ app.post("/chat",async(req,res)=>{
             error:error.message
         });
     }finally{
+        clearTimeout(generationTimer);
         session?.dispose();
         generationInProgress=false;
     }
