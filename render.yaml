@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: smollm-render-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: STREAM_CHUNK_DELAY_MS
+        value: 10
+      - key: MODEL_URL
+        value: https://huggingface.co/second-state/SmolLM-135M-Instruct-GGUF/resolve/main/SmolLM-135M-Instruct-Q4_K_M.gguf
