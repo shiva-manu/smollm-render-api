@@ -30,6 +30,8 @@ A Node.js Express API wrapping SmolLM (or other GGUF LLMs) using `node-llama-cpp
    # Copy or download your model.gguf here
    ```
 
+   This project uses [SmolLM2-135M-Instruct Q4_K_M](https://huggingface.co/jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF) by default. It downloads automatically during `npm install`. You can replace it with any GGUF model by changing `MODEL_PATH`.
+
 ### Running the Server
 
 Start the API server:
@@ -71,6 +73,7 @@ curl http://localhost:3000/health
 
 ### Environment
 
+- `CORS_ORIGIN`: Allowed browser origin for cross-origin requests from `render-ui`. Defaults to `*`.
 - `MODEL_PATH`: GGUF model path. Defaults to `./models/model.gguf`.
 - `MAX_TOKENS`: Default token limit for requests that omit `maxTokens`. Defaults to `256`.
 - `STREAM_CHUNK_DELAY_MS`: Artificial delay between streamed characters. Defaults to `0`.
